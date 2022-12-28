@@ -1,0 +1,95 @@
+image: docker:dind #Alpine
+
+stages:
+    - setup
+    - testing
+    - docker_image
+    - deploy
+
+env:
+    stage: setup
+    script:
+        - chmod +x ./tools/setup_env.sh
+        - ./tools/setup_env.sh
+    after_script:
+        - rm ./tools/setup_env.sh
+    artifacts:
+        paths:
+            - .env
+        expire_in: 1 days
+
+jest:
+    stage: testing
+    needs:
+        - env
+    before_script:
+        - docker rm rpa-itau-extracts-test || true
+        - rm -r coverage || true
+        - rm junit.xml || true
+    script:
+        - apk add --update nodejs npm
+        - npm run docker:test
+        - docker cp rpa-itau-extracts-test:/usr/src/coverage .
+        - docker cp rpa-itau-extracts-test:/usr/src/junit.xml .
+        - if grep '<failure' junit.xml; then exit 1; else exit 0; fi
+    cache:
+        paths:
+            - coverage/
+    artifacts:
+        when: always
+        expire_in: 1 days
+        paths:
+            - coverage/
+        reports:
+            junit:
+                - junit.xml
+
+coverage_page:
+    stage: testing
+    needs:
+        - jest
+    script:
+        - mkdir .public
+        - cp -r coverage/* .public
+        - mv .public public
+    artifacts:
+        expire_in: 1 days
+        paths:
+            - public
+    only:
+        - main
+
+build:
+    stage: docker_image
+    needs:
+        - env
+        - jest
+    before_script:
+        - echo "$CI_COMMIT_SHORT_SHA"
+        - echo "$DOCKER_REGISTRY_PASS" | docker login registry.gitlab.com --username $DOCKER_REGISTRY_USER --password-stdin
+        - echo YIQI_SCHEMA=37 >> .env
+        - echo MAILER_EMAILTO=$MAILER_EMAILTO >> .env
+        - apk add --update nodejs npm
+    script:
+        - npm run docker:build
+    after_script:
+        - rm -r src
+    only:
+        - main
+
+push:
+    stage: docker_image
+    needs:
+        - build
+    before_script:
+        - apk add --update nodejs npm
+        - echo "$DOCKER_REGISTRY_PASS" | docker login registry.gitlab.com --username $DOCKER_REGISTRY_USER --password-stdin
+    script:
+        - npm run docker:push
+    only:
+        - main
+
+remove_env:
+    stage: deploy
+    script:
+        - rm .env
